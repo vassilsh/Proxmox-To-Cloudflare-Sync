@@ -2,19 +2,11 @@ services:
   proxmox-cloudflare-sync:
     build: .
     container_name: proxmox-cloudflare-sync
-    restart: always
-    environment:
-      DEBUG: "false"
-      VALID_NETWORKS: 192.168.2.0/24,192.168.3.0/24 #comma separated
-      PREDICT_NETWORK: 192.168.2.0/24
-      PREDICT_IP_ADDRESSES: true
-      PREDICT_IP_ADDRESSES_VMID_BLACKLIST: #comma separated
-      PROXMOX_URL: https://proxmox-server:8006
-      PROXMOX_NODES_LIST: pve01,pve02 #comma separated
-      PROXMOX_TOKEN_NAME: api-user@pam!main
-      PROXMOX_TOKEN: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-      CLOUDFLARE_TOKEN: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-      CLOUDFLARE_ZONE: mydomain.net
-      CLOUDFLARE_DNS_SUBDOMAIN: nyc #optional
-      INTERVAL: 1h #optional, default in container is 1h.
- 
+    restart: unless-stopped
+    env_file:
+      - .env  # Keep all your secret tokens here
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
