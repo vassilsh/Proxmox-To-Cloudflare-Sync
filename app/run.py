@@ -22,108 +22,92 @@ class Proxmox:
         self.predict_ip_addresses_vmid_blacklist = predict_ip_addresses_vmid_blacklist
 
     async def get_vms(self):
-        """get vms from proxmox server"""
+        """get vms AND lxcs from proxmox server"""
         try:
             async with aiohttp.ClientSession() as session:
-                # get all vms from proxmox
                 tasks = []
                 for node in self.proxmox_nodes:
-                    logging.debug(f"Retrieving VMs from node {node}...")
+                    logging.debug(f"Retrieving entities from node {node}...")
+                    
+                    # 1. Fetch VMs
                     async with session.get(f"{self.proxmox_url}/api2/json/nodes/{node}/qemu", headers={"Authorization": self.proxmox_token}, verify_ssl=False) as r:
                         r.raise_for_status()
-                        response = json.loads(await r.text())
-                        vms = self._filter_vms(response['data'])
-                        tasks.extend([ asyncio.create_task(self.get_vm_ip(session, node, vm)) for vm in vms ])
-                        logging.debug(f"Found {len(vms)} VMs on node {node}")
+                        vms = self._filter_vms(json.loads(await r.text())['data'])
+                        tasks.extend([asyncio.create_task(self.get_vm_ip(session, node, vm)) for vm in vms])
+                    
+                    # 2. Fetch LXCs
+                    async with session.get(f"{self.proxmox_url}/api2/json/nodes/{node}/lxc", headers={"Authorization": self.proxmox_token}, verify_ssl=False) as r:
+                        r.raise_for_status()
+                        lxcs = self._filter_vms(json.loads(await r.text())['data'])
+                        tasks.extend([asyncio.create_task(self.get_lxc_ip(session, node, lxc)) for lxc in lxcs])
 
-                # get ip address for each vm
-                vms = await asyncio.gather(*tasks)
-
-                # remove None items from list
-                vms = [ i for i in vms if i is not None ]
-                return vms
-
+                results = await asyncio.gather(*tasks)
+                return [i for i in results if i is not None]
         except Exception:
-            logging.exception('Error while getting VM list from Proxmox')
+            logging.exception('Error while getting VM/LXC list from Proxmox')
             return False
 
     async def get_vm_ip(self, session, node, vm):
-        """get vms from proxmox server"""
+        # ... (keep your existing get_vm_ip code here) ...
         try:
             vmid = vm['vmid']
-
-            # get nic info for vm
             nic_info = await self.get_vm_nics(session, node, vmid)
             ip_address = None
             if nic_info:
-                # get ip address from nic info
                 ip_address = self.get_ip_from_nics(nic_info)
-
-            # did we find the ip address, or should we predict it?
             if ip_address:
                 vm['ip_address'] = str(ip_address)
                 logging.info(f"IP address for {vmid} on {node} is {vm['ip_address']}")
             else:
-                if not predict_ip_addresses:
-                    logging.info(f"Unable to lookup IP address for {vmid} on {node}. IP address prediction is disabled")
+                # ... (rest of your existing logic for prediction) ...
+                if not self.predict_ip_addresses or str(vmid) in self.predict_ip_addresses_vmid_blacklist or int(vmid) > 254:
                     return
-
-                if str(vmid) in predict_ip_addresses_vmid_blacklist:
-                    logging.info(f"Unable to lookup IP address for {vmid} on {node}. IP address prediction is disabled (VMID is blacklisted for prediction)")
-                    return
-
-                if int(vmid) > 254:
-                    logging.info(f"Unable to lookup IP address for {vmid} on {node}. Not generating a predicted address because the ID ({vmid}) is greater than 254")
-                    return
-                else:
-                    vm['ip_address'] = str(self.predict_network.network_address + int(vmid))
-                    logging.info(f"Unable to lookup IP address for {vmid} on {node}. Using predicted address of {vm['ip_address']}")
-
+                vm['ip_address'] = str(self.predict_network.network_address + int(vmid))
+                logging.info(f"Unable to lookup IP address for {vmid} on {node}. Using predicted address of {vm['ip_address']}")
             return vm
-
         except Exception:
             logging.exception(f'Error while getting IP address for {vmid}')
             return False
 
+    async def get_lxc_ip(self, session, node, lxc):
+        vmid = lxc['vmid']
+        try:
+            async with session.get(f"{self.proxmox_url}/api2/json/nodes/{node}/lxc/{vmid}/config", headers={"Authorization": self.proxmox_token}, verify_ssl=False) as r:
+                r.raise_for_status()
+                data = json.loads(await r.text())['data']
+                for key, value in data.items():
+                    if key.startswith('net') and 'ip=' in value:
+                        ip_part = value.split('ip=')[1].split(',')[0].split('/')[0]
+                        lxc['ip_address'] = ip_part
+                        logging.info(f"IP address for {vmid} on {node} is {ip_part}")
+                        return lxc
+        except Exception:
+            logging.debug(f"Could not retrieve static IP from config for LXC {vmid}")
+        return None
+
     async def get_vm_nics(self, session, node, vmid):
+        # ... (keep your existing get_vm_nics code here) ...
         try:
             async with session.get(f"{self.proxmox_url}/api2/json/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces", headers={"Authorization": self.proxmox_token}, verify_ssl=False) as r:
                 r.raise_for_status()
                 results = json.loads(await r.text())['data']['result']
-
-                if 'error' in results:
-                    return False
-
-                return results
-
+                return results if 'error' not in results else False
         except Exception:
             return False
 
     def get_ip_from_nics(self, nic_info):
-        # look for an ip address that is inside network
-        if nic_info:
-            for interface in nic_info:
-                # skip interfaces that dont have ip addresses
-                if 'ip-addresses' not in interface.keys():
-                    logging.debug(f"Skipping over interface \"{interface['name']}\" because it does not have any IP addresses")
-                    continue
-                ip_addresses = [ipaddr['ip-address'] for ipaddr in interface["ip-addresses"] if ipaddr['ip-address-type'] == 'ipv4']
-                for ip_address in ip_addresses:
-                    ip_address = ipaddress.IPv4Address(ip_address)
-                    for n in valid_networks:
-                        if ip_address in n:
-                            return ip_address
+        # ... (keep your existing get_ip_from_nics code here) ...
+        for interface in nic_info:
+            if 'ip-addresses' in interface:
+                for ipaddr in interface["ip-addresses"]:
+                    if ipaddr.get('ip-address-type') == 'ipv4':
+                        ip = ipaddress.IPv4Address(ipaddr['ip-address'])
+                        if any(ip in n for n in self.valid_networks):
+                            return ip
         return False
 
-
-    def _filter_vms(self, vms):
-        """remove templates and other unneeded info from vm list"""
-        # remove templates from list so we only have vms
-        no_templates = [d for d in vms if d.get('template') != 1]
-
-        # remove everything except name and vmid from each dict in list
-        filtered = [{k:v for k,v in d.items() if k in ('name', 'vmid')} for d in no_templates]
-        return filtered
+    def _filter_vms(self, entities):
+        return [{k:v for k,v in d.items() if k in ('name', 'vmid')} for d in entities if d.get('template') != 1]
 
 
 class Cloudflare:
