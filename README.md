@@ -1,3 +1,17 @@
+This is a fork of the original https://github.com/AndrewPaglusch/Proxmox-To-Cloudflare-Sync script. This version adds native support for Proxmox LXC containers in addition to the original VM support.
+
+What's New
+The original script was designed exclusively for QEMU VMs. This fork adds:
+
+LXC Support: The script now queries Proxmox for both VMs and LXC containers.
+
+Static IP Parsing: Automatically detects static IP addresses assigned to LXC containers by parsing the container's configuration (netX parameter).
+
+Requirements
+Static IPs: For LXC containers, this script works most reliably when the containers have static IPs assigned in the Proxmox network configuration.
+
+Permissions: Ensure your Proxmox API Token has Sys.Audit and VM.Audit permissions.
+
 # Proxmox Cloudflare Sync
 
 This application queries your Proxmox node(s) to retrieve a list of all VMs. It attempts to determine each VM's IP address and subsequently updates the corresponding A records on Cloudflare. If the VM's IP address cannot be discovered, the application generates a predicted IP address based on the VM's VMID, using it as the last octet of an IP address within the specified `PREDICT_NETWORK` range. This predicted IP address is then used to create or update the A record on Cloudflare, ensuring that the DNS records remain up-to-date even when the IP address of a VM cannot be directly determined.
