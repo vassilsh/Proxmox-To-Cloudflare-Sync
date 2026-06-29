@@ -10,7 +10,7 @@ Static IP Parsing: Automatically detects static IP addresses assigned to LXC con
 Requirements
 Static IPs: For LXC containers, this script works most reliably when the containers have static IPs assigned in the Proxmox network configuration.
 
-Permissions: Ensure your Proxmox API Token has Sys.Audit and VM.Audit permissions.
+Permissions: Ensure your Proxmox API Token has PVEAuditor permissions.
 
 # Proxmox Cloudflare Sync
 
@@ -44,10 +44,10 @@ This tool is perfect for users who manage dynamic Proxmox VM environments and wa
 
 1. Clone the repository to your server:
 ```bash
-git clone https://github.com/AndrewPaglusch/Proxmox-To-Cloudflare-Sync.git
+git clone https://github.com/vassilsh/Proxmox-To-Cloudflare-Sync.git
 cd Proxmox-To-Cloudflare-Sync/
 ```
-2. Copy docker-compose.yml.EXAMPLE to docker-compose.yml and set the environment variables as needed.
+2. Copy docker-compose.yml.EXAMPLE to docker-compose.yml and .env.EXAMPLE to .env. Set the environment variables as needed.
 3. Start the container using Docker Compose:
 ```bash
 docker-compose up -d
