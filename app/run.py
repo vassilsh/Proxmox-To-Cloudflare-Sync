@@ -66,24 +66,44 @@ class Proxmox:
 
         A single unreachable node, or a single malformed VM/LXC entry, does not abort
         the whole run - it is logged and the rest of the fleet is still processed.
-        Returns a list of entities (possibly empty) on success, or False on total failure.
+
+        Returns False on total failure (no node could be listed at all). Otherwise returns
+        (entities, roster, roster_complete):
+          - entities: VMs/LXCs that resolved (or predicted) an IP address this cycle - the
+            set that actually gets synced to Cloudflare. Can be empty even on a good cycle
+            (e.g. every guest agent was briefly unresponsive).
+          - roster: names of every VM/LXC Proxmox reported this cycle, from the list APIs,
+            independent of whether an IP was resolved for them. This is the trustworthy
+            "does this thing still exist at all" signal - use this, not `entities`, to decide
+            whether a DNS record is safe to prune. An entity that merely failed IP resolution
+            this cycle still appears here and must never be treated as gone.
+          - roster_complete: True only if every configured node was listed successfully this
+            cycle. False means the roster is missing whatever lives on the failed node(s), so
+            it is unsafe to use for pruning this cycle.
         """
         async with aiohttp.ClientSession() as session:
             tasks = []
+            roster = set()
+            roster_complete = True
+            any_node_ok = False
             for node in self.proxmox_nodes:
                 logging.debug(f"Retrieving entities from node {node}...")
                 try:
                     vms_data = await self._get(session, f"{self.proxmox_url}/api2/json/nodes/{node}/qemu")
                     vms = self._filter_vms(vms_data['data'])
+                    roster.update(v['name'] for v in vms)
                     tasks.extend(asyncio.create_task(self.get_vm_ip(session, node, vm)) for vm in vms)
 
                     lxcs_data = await self._get(session, f"{self.proxmox_url}/api2/json/nodes/{node}/lxc")
                     lxcs = self._filter_vms(lxcs_data['data'])
+                    roster.update(l['name'] for l in lxcs)
                     tasks.extend(asyncio.create_task(self.get_lxc_ip(session, node, lxc)) for lxc in lxcs)
+                    any_node_ok = True
                 except Exception:
                     logging.exception(f"Error listing VMs/LXCs on node {node}. Skipping this node for this cycle")
+                    roster_complete = False
 
-            if not tasks:
+            if not any_node_ok:
                 logging.error("No VMs or LXCs were discovered on any node")
                 return False
 
@@ -94,7 +114,7 @@ class Proxmox:
                     logging.error("Unhandled error while processing an entity", exc_info=result)
                 elif result:
                     entities.append(result)
-            return entities
+            return entities, roster, roster_complete
 
     async def get_vm_ip(self, session, node, vm):
         vmid = vm['vmid']
@@ -165,8 +185,12 @@ class Proxmox:
         try:
             data = await self._get(session, f"{self.proxmox_url}/api2/json/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces")
             results = data['data']['result']
-            return results if 'error' not in results else False
-        except Exception:
+            if 'error' in results:
+                logging.debug(f"Guest agent returned an error for VM {vmid} on {node}: {results['error']}")
+                return False
+            return results
+        except Exception as exc:
+            logging.debug(f"Could not query guest agent for VM {vmid} on {node}: {exc}")
             return False
 
     def get_ip_from_nics(self, nic_info):
@@ -177,16 +201,22 @@ class Proxmox:
                         ip = ipaddress.IPv4Address(ipaddr['ip-address'])
                         if any(ip in n for n in self.valid_networks):
                             return ip
+                        logging.debug(f"Discovered IP {ip} is outside valid_networks, ignoring")
         return False
 
     def _should_predict(self, vmid):
         if not self.predict_ip_addresses:
+            logging.debug(f"IP prediction is disabled; not predicting an IP for {vmid}")
             return False
         if str(vmid) in self.predict_ip_addresses_vmid_blacklist:
+            logging.debug(f"VMID {vmid} is on the prediction blacklist; not predicting an IP")
             return False
         # last usable host offset in predict_network (excludes network and broadcast addresses)
         max_offset = self.predict_network.num_addresses - 2
-        return int(vmid) <= max_offset
+        if int(vmid) > max_offset:
+            logging.debug(f"VMID {vmid} exceeds predict_network's usable host range (max {max_offset}); cannot predict an IP")
+            return False
+        return True
 
     def _filter_vms(self, entities):
         return [{k: v for k, v in d.items() if k in ('name', 'vmid')} for d in entities if d.get('template') != 1]
@@ -315,7 +345,7 @@ class Cloudflare:
 
 
 async def sync_to_cloudflare(cloudflare_token, cloudflare_zone, cloudflare_dns_subdomain, request_timeout,
-                              prune_stale_records, vms):
+                              prune_stale_records, vms, roster, roster_complete):
     async with Cloudflare(cloudflare_token, cloudflare_zone, request_timeout) as cf:
         if not await cf.setup():
             logging.error("Failed to set up the Cloudflare zone. Skipping this sync cycle")
@@ -323,11 +353,13 @@ async def sync_to_cloudflare(cloudflare_token, cloudflare_zone, cloudflare_dns_s
 
         managed_suffix = f".{cloudflare_dns_subdomain}.{cloudflare_zone}" if cloudflare_dns_subdomain else f".{cloudflare_zone}"
 
+        def to_fqdn(name):
+            return f"{name.removesuffix(managed_suffix)}{managed_suffix}"
+
         expected_names = set()
         tasks = []
         for vm in vms:
-            base_name = vm['name'].removesuffix(managed_suffix)
-            fqdn = f"{base_name}{managed_suffix}"
+            fqdn = to_fqdn(vm['name'])
             if fqdn in expected_names:
                 logging.warning(f"Multiple VMs/LXCs resolve to the DNS name {fqdn}; only one of their IP "
                                  f"addresses will end up set, and which one wins is not guaranteed")
@@ -335,17 +367,28 @@ async def sync_to_cloudflare(cloudflare_token, cloudflare_zone, cloudflare_dns_s
             tasks.append(asyncio.create_task(cf.update_record(fqdn, vm['ip_address'])))
         await asyncio.gather(*tasks, return_exceptions=True)
 
-        await _prune_stale_records(cf, managed_suffix, expected_names, prune_stale_records)
+        if not roster_complete:
+            logging.info("Skipping the stale-record check this cycle: not every Proxmox node could be listed, "
+                         "so the current VM/LXC roster is incomplete and unsafe to prune against")
+            return
+
+        roster_fqdns = {to_fqdn(name) for name in roster}
+        await _prune_stale_records(cf, managed_suffix, roster_fqdns, prune_stale_records)
 
 
-async def _prune_stale_records(cf, managed_suffix, expected_names, enabled):
-    """Remove (or report) A records under our managed suffix with no matching VM/LXC this cycle.
+async def _prune_stale_records(cf, managed_suffix, roster_fqdns, enabled):
+    """Remove (or report) A records under our managed suffix with no matching entry in the
+    current Proxmox roster - i.e. a VM/LXC that has genuinely been removed or renamed.
+
+    Checked against the full node roster, not just entities that resolved an IP this cycle -
+    an entity that merely failed IP resolution this cycle (guest agent hiccup, transient LXC
+    config-read failure, etc.) still exists in the roster and must never be treated as stale.
 
     Disabled by default: deleting DNS records is destructive, and without CLOUDFLARE_DNS_SUBDOMAIN
     scoping this can match unrelated hand-created records that merely share the zone.
     """
     stale = [(name, info['record_id']) for name, info in cf.zone_records.items()
-             if name.endswith(managed_suffix) and name not in expected_names]
+             if name.endswith(managed_suffix) and name not in roster_fqdns]
     if not stale:
         return
 
@@ -450,16 +493,17 @@ proxmox = Proxmox(proxmox_url, proxmox_nodes, proxmox_token_name, proxmox_token,
                    predict_network, predict_ip_addresses, predict_ip_addresses_vmid_blacklist,
                    proxmox_verify_ssl, request_timeout)
 
-vms = asyncio.run(proxmox.get_vms())
+result = asyncio.run(proxmox.get_vms())
 
-if vms is False:
+if result is False:
     logging.critical("Unable to get VM/LXC list from Proxmox")
     sys.exit(1)
 
+vms, roster, roster_complete = result
 if not vms:
-    logging.warning("No VMs or LXCs with a resolvable or predictable IP address were found; nothing to sync this cycle")
-else:
-    asyncio.run(sync_to_cloudflare(cloudflare_token, cloudflare_zone, cloudflare_dns_subdomain,
-                                    request_timeout, prune_stale_records, vms))
+    logging.warning("No VMs or LXCs with a resolvable or predictable IP address were found this cycle")
+
+asyncio.run(sync_to_cloudflare(cloudflare_token, cloudflare_zone, cloudflare_dns_subdomain,
+                                request_timeout, prune_stale_records, vms, roster, roster_complete))
 
 _record_success()

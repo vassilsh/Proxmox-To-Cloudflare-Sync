@@ -54,6 +54,8 @@ By default this tool only creates and updates A records; it never deletes one. W
 
 Set `PRUNE_STALE_RECORDS=true` to have those records deleted automatically. This is scoped to your managed suffix: with `CLOUDFLARE_DNS_SUBDOMAIN` set, only records ending in `.<subdomain>.<zone>` are candidates for deletion. **Without a subdomain set, every A record in the zone that doesn't match a currently discovered VM or LXC name is a deletion candidate** - including ones you created by hand for unrelated purposes. If you enable pruning and don't want that exposure, set `CLOUDFLARE_DNS_SUBDOMAIN` so pruning only ever touches records under that subdomain.
 
+A record is only ever considered stale if its VM/LXC is missing from Proxmox's full roster (the node listing APIs), not merely because it failed to report an IP on this particular cycle - a guest agent hiccup or a transient LXC config-read failure won't get a live entity's record deleted. If any configured node can't be listed at all this cycle, the roster is treated as untrustworthy and pruning is skipped entirely for that cycle, logged clearly, regardless of `PRUNE_STALE_RECORDS`.
+
 ## Deployment
 
 1. Clone the repository to a host that can reach your Proxmox and Cloudflare APIs:
