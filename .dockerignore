@@ -1,0 +1,12 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.EXAMPLE
+app/config.ini
+docker-compose.yml
+venv
+__pycache__
+*.pyc
+README.md
+LICENSE
