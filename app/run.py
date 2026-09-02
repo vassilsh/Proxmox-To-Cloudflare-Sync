@@ -138,6 +138,11 @@ class Proxmox:
         vmid = lxc['vmid']
         try:
             ip_address = await self._get_lxc_static_ip(session, node, vmid)
+            if not ip_address:
+                # No static ip= in the config (DHCP, or no address configured at all). Ask
+                # Proxmox for the container's actual live address instead of guessing - unlike
+                # QEMU, LXC needs no guest agent for this since it shares the host kernel.
+                ip_address = await self._get_lxc_live_ip(session, node, vmid)
             if ip_address:
                 lxc['ip_address'] = str(ip_address)
                 logging.info(f"IP address for {vmid} on {node} is {lxc['ip_address']}")
@@ -179,6 +184,36 @@ class Proxmox:
             if any(ip in n for n in self.valid_networks):
                 return ip
             logging.debug(f"Static IP {ip} for LXC {vmid} on {node} (interface {key}) is outside valid_networks, ignoring")
+        return False
+
+    async def _get_lxc_live_ip(self, session, node, vmid):
+        """Look up the LXC's actual live IPv4 address, validated against valid_networks.
+
+        Covers DHCP-assigned addresses (and anything else not visible in the static config),
+        by reading the container's live network interfaces directly - LXC needs no guest agent
+        for this, unlike QEMU, since containers share the host kernel. Requires the container
+        to be running, and requires a Proxmox version that has this endpoint (added in PVE 8);
+        either condition failing just means no address is found here, and the caller falls
+        through to prediction exactly as it would for a stopped or agent-less QEMU VM.
+        """
+        try:
+            data = await self._get(session, f"{self.proxmox_url}/api2/json/nodes/{node}/lxc/{vmid}/interfaces")
+        except Exception as exc:
+            logging.debug(f"Could not query live interfaces for LXC {vmid} on {node}: {exc}")
+            return False
+
+        for interface in data.get('data') or []:
+            for ipaddr in interface.get('ip-addresses', []):
+                if ipaddr.get('ip-address-type') != 'inet':
+                    continue
+                try:
+                    ip = ipaddress.IPv4Address(ipaddr['ip-address'])
+                except ValueError:
+                    continue
+                if any(ip in n for n in self.valid_networks):
+                    return ip
+                logging.debug(f"Live IP {ip} for LXC {vmid} on {node} (interface {interface.get('name')}) "
+                               f"is outside valid_networks, ignoring")
         return False
 
     async def get_vm_nics(self, session, node, vmid):

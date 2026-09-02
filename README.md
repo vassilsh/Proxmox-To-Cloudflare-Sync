@@ -7,10 +7,10 @@ This application queries your Proxmox node(s) for all VMs and LXC containers, de
 ## How IP addresses are found
 
 - **QEMU VMs**: via the QEMU guest agent (`network-get-interfaces`). Requires the guest agent to be installed and running in the VM.
-- **LXC containers**: by parsing the container's network configuration (`netX` lines) for a statically assigned IP. DHCP-configured interfaces (`ip=dhcp`) are skipped, not treated as a literal address.
-- **Fallback (both)**: if no real IP address is found and `PREDICT_IP_ADDRESSES=true`, a predicted address is used instead: `PREDICT_NETWORK`'s network address plus the entity's VMID.
+- **LXC containers**: first from the container's network configuration (`netX` lines) if it has a statically assigned IP. If the interface is DHCP-configured (`ip=dhcp`) or has no address configured, the container's actual live IP is read directly from Proxmox instead (no guest agent needed - LXCs share the host kernel, so this works for DHCP-assigned addresses too). This live lookup needs the container running and a Proxmox VE version that has the `/interfaces` endpoint (added in PVE 8); on an older Proxmox, or a stopped container, it's skipped and the entity falls through to prediction exactly as if no IP had been found at all.
+- **Fallback (both)**: if no real IP address is found and `PREDICT_IP_ADDRESSES=true`, a predicted address is used instead: `PREDICT_NETWORK`'s network address plus the entity's VMID. This is a guess, not a lookup - it has no reason to match a DHCP-assigned address, so treat it as a last resort, not an alternative to giving the entity a static IP or letting the live lookup find its real one.
 
-Any IP address found this way, static or agent-reported, is only used if it falls inside one of the `VALID_NETWORKS` ranges. Addresses outside those ranges are ignored, and the entity falls through to prediction (or is skipped if prediction is off or its VMID is blacklisted).
+Any IP address found this way, static, agent-reported, or live-queried, is only used if it falls inside one of the `VALID_NETWORKS` ranges. Addresses outside those ranges are ignored, and the entity falls through to prediction (or is skipped if prediction is off or its VMID is blacklisted).
 
 ## Prerequisites
 
